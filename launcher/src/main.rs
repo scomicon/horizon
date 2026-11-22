@@ -251,6 +251,17 @@ enum Load<T> {
 
 const LOG_LINES: usize = 2000;
 
+enum InstallSource {
+    Instance,
+    Manual(instances::ManualInstallTarget),
+    Update,
+}
+
+struct QueuedInstall {
+    release: Release,
+    source: InstallSource,
+}
+
 struct Launcher {
     theme: Theme,
     page: Page,
@@ -294,10 +305,10 @@ struct Launcher {
     /// The Horizon version being installed because an instance was made or saved to play it: it
     /// becomes the launcher's version only when the launcher has none.
     instance_install: Option<String>,
-    /// One for an instance waiting for the install running now to end.
-    install_next: Option<Release>,
-    /// An install waiting for a running Prepare of the same target version folder to finish.
-    install_after_prepare: Option<Release>,
+    /// The displayed instance when a manual install started.
+    manual_install_for: Option<instances::ManualInstallTarget>,
+    /// Pending downloads retain the reason and instance that requested them.
+    install_queue: VecDeque<QueuedInstall>,
     /// The Stable build Home's Update is installing (`nightly::install_stable`).
     stable_install: Option<Release>,
     /// A Stable build whose download failed: not offered again until the release list is read
