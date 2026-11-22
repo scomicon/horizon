@@ -112,6 +112,7 @@ impl Launcher {
             update_install: None,
             instance_install: None,
             install_next: None,
+            install_after_prepare: None,
             stable_install: None,
             stable_failed: None,
             bar: (0., 0.),

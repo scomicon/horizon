@@ -62,6 +62,15 @@ impl Launcher {
         if release.asset.is_none() || self.removing.contains(&release.tag) {
             return;
         }
+        if install_overlaps_prepare(
+            self.preparing,
+            self.prepare_tag.as_deref(),
+            &release.tag,
+            backend::prepared_in,
+        ) {
+            self.install_after_prepare = Some(release.clone());
+            return;
+        }
         let (release, tx) = (release.clone(), self.tx.clone());
         let tag = release.tag.clone();
         self.installing = Some((tag.clone(), 0.0));
@@ -216,9 +225,30 @@ impl Launcher {
         }
     }
 
+    /// Starts an install queued behind an overlapping Prepare once Prepare and any active
+    /// install have finished.
+    pub(crate) fn start_queued_install(&mut self) {
+        let Some(release) = take_queued_install(
+            &mut self.install_after_prepare,
+            self.preparing,
+            self.installing.is_some(),
+        ) else {
+            return;
+        };
+        self.install(&release);
+    }
+
     /// [`Self::prepare`] for `tag` rather than the selected version. False when it didn't start:
-    /// the version is gone, and `prepare_error` says so.
+    /// the version is gone (and `prepare_error` says so), or an install of the same target is
+    /// still running.
     pub(crate) fn prepare_version(&mut self, tag: String, from: backend::MinecraftFrom) -> bool {
+        if prepare_overlaps_install(
+            self.installing.as_ref().map(|(t, _)| t.as_str()),
+            &tag,
+            backend::prepared_in,
+        ) {
+            return false;
+        }
         if !self.version_still_installed(&tag) {
             return false;
         }
@@ -635,12 +665,62 @@ fn take_queued_play(
     queued.take()
 }
 
+fn install_overlaps_prepare(
+    preparing: bool,
+    prepare_tag: Option<&str>,
+    target: &str,
+    prepared_in: impl Fn(&str) -> String,
+) -> bool {
+    preparing && prepare_tag.is_some_and(|tag| tag == target || prepared_in(tag) == target)
+}
+
+fn prepare_overlaps_install(
+    installing: Option<&str>,
+    tag: &str,
+    prepared_in: impl Fn(&str) -> String,
+) -> bool {
+    installing.is_some_and(|target| target == tag || prepared_in(tag) == target)
+}
+
+fn take_queued_install(
+    queued: &mut Option<super::Release>,
+    preparing: bool,
+    installing: bool,
+) -> Option<super::Release> {
+    if preparing || installing {
+        return None;
+    }
+    queued.take()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::take_queued_play;
+    use super::{
+        install_overlaps_prepare, prepare_overlaps_install, take_queued_install, take_queued_play,
+    };
+    use horizon_launcher::backend::Release;
 
     fn queued() -> Option<(String, String)> {
         Some(("nightly-2026-11-19".into(), "instance-1".into()))
+    }
+
+    fn release(tag: &str) -> Release {
+        Release {
+            tag: tag.into(),
+            name: tag.into(),
+            body: String::new(),
+            date: String::new(),
+            time: String::new(),
+            asset: None,
+            prerelease: false,
+            nightly: None,
+        }
+    }
+
+    fn base_of(tag: &str) -> String {
+        tag.strip_suffix("-native")
+            .unwrap_or(tag)
+            .to_owned()
     }
 
     #[test]
@@ -654,5 +734,70 @@ mod tests {
         );
         assert_eq!(take_queued_play(&mut waiting, false), queued());
         assert_eq!(waiting, None, "once no start holds the Stop, it is taken");
+    }
+
+    #[test]
+    fn install_overlaps_prepare_matches_same_tag_and_native_base() {
+        assert!(!install_overlaps_prepare(
+            false,
+            Some("nightly-2026-11-22"),
+            "nightly-2026-11-22",
+            base_of,
+        ));
+        assert!(!install_overlaps_prepare(
+            true,
+            None,
+            "nightly-2026-11-22",
+            base_of,
+        ));
+        assert!(install_overlaps_prepare(
+            true,
+            Some("nightly-2026-11-22"),
+            "nightly-2026-11-22",
+            base_of,
+        ));
+        assert!(install_overlaps_prepare(
+            true,
+            Some("nightly-2026-11-22-native"),
+            "nightly-2026-11-22",
+            base_of,
+        ));
+        assert!(!install_overlaps_prepare(
+            true,
+            Some("nightly-2026-11-21"),
+            "nightly-2026-11-22",
+            base_of,
+        ));
+    }
+
+    #[test]
+    fn prepare_overlaps_install_matches_same_tag_and_native_base() {
+        assert!(!prepare_overlaps_install(None, "nightly-2026-11-22", base_of));
+        assert!(prepare_overlaps_install(
+            Some("nightly-2026-11-22"),
+            "nightly-2026-11-22",
+            base_of,
+        ));
+        assert!(prepare_overlaps_install(
+            Some("nightly-2026-11-22"),
+            "nightly-2026-11-22-native",
+            base_of,
+        ));
+        assert!(!prepare_overlaps_install(
+            Some("nightly-2026-11-21"),
+            "nightly-2026-11-22",
+            base_of,
+        ));
+    }
+
+    #[test]
+    fn queued_install_waits_for_prepare_and_other_installs() {
+        let mut waiting = Some(release("nightly-2026-11-22"));
+        assert!(take_queued_install(&mut waiting, true, false).is_none());
+        assert!(take_queued_install(&mut waiting, false, true).is_none());
+        assert_eq!(waiting.as_ref().map(|r| r.tag.as_str()), Some("nightly-2026-11-22"));
+        let taken = take_queued_install(&mut waiting, false, false).unwrap();
+        assert_eq!(taken.tag, "nightly-2026-11-22");
+        assert!(waiting.is_none());
     }
 }

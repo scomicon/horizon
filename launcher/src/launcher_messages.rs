@@ -271,6 +271,9 @@ impl Launcher {
                     if let Some(next) = self.install_next.take() {
                         self.install_for_instance(next);
                     }
+                    if self.installing.is_none() {
+                        self.start_queued_install();
+                    }
                     // After the selection and the queued install: a build waiting for this
                     // install sees both.
                     self.native_look_again(None, None);
@@ -463,6 +466,10 @@ impl Launcher {
                                 tag.map(|t| backend::prepared_in(&t)),
                                 self.prepare_error.clone(),
                             );
+                            if self.install_after_prepare.is_some() {
+                                self.play_when_prepared = None;
+                                self.start_queued_install();
+                            }
                             self.native_look_again(ended.as_deref(), error.as_deref());
                         }
                         Job::Client => {
