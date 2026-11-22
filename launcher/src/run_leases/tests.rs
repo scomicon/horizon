@@ -570,3 +570,140 @@ fn wrapped_game_starts_and_holds_the_wrappers_resources() {
     ));
     drop(claims);
 }
+
+fn spawn_without_horizon_home(env_key: &str, test_name: &str) {
+    let root = tempfile::tempdir().unwrap();
+    let launcher = root.path().join("launcher");
+    fs::create_dir_all(&launcher).unwrap();
+    assert!(Command::new(std::env::current_exe().unwrap())
+        .args(["--include-ignored", "--exact", test_name])
+        .env(env_key, root.path())
+        .env_remove("HORIZON_HOME")
+        .env("HORIZON_LAUNCHER_HOME", &launcher)
+        .env(
+            "HORIZON_LAUNCHER_LOCATION_FILE",
+            root.path().join("location.json"),
+        )
+        .env("XDG_DATA_HOME", root.path().join("platform"))
+        .env("XDG_CONFIG_HOME", root.path().join("config"))
+        .env("HOME", root.path().join("user"))
+        .env("USERPROFILE", root.path().join("user"))
+        .env("APPDATA", root.path().join("platform"))
+        .env("HORIZON_LAUNCHER_TRASH", root.path().join("trash"))
+        .env("HORIZON_LAUNCHER_CLIPBOARD", root.path().join("clipboard"))
+        .env("HORIZON_LAUNCHER_DESKTOP", root.path().join("desktop"))
+        .env("HORIZON_LAUNCHER_NO_SELF_UPDATE", "1")
+        .env("HORIZON_NO_AUDIO", "1")
+        .status()
+        .unwrap()
+        .success());
+}
+
+fn assert_default_homes_absent(root: &Path) {
+    for default_home in [
+        root.join("platform/horizon"),
+        root.join("user/.local/share/horizon"),
+        root.join("user/Library/Application Support/horizon"),
+    ] {
+        assert!(!default_home.exists(), "created {}", default_home.display());
+    }
+}
+
+#[test]
+fn a_java_edition_launch_without_horizon_home_starts_when_default_home_is_missing() {
+    const ENV: &str = "JAVA_NO_DEFAULT_HOME_ROOT";
+    if let Some(root) = std::env::var_os(ENV) {
+        let root = Path::new(&root);
+        let instance = root.join("instance");
+        fs::create_dir_all(&instance).unwrap();
+        let mut java = Command::new("java");
+        java.args([
+            "-cp",
+            "client.jar",
+            "net.minecraft.client.main.Main",
+            "--gameDir",
+            instance.to_str().unwrap(),
+        ])
+        .current_dir(&instance);
+        let java = crate::launch::wrap(java, &crate::launch::Launch::default()).unwrap();
+        let _claims = shared(&java)
+            .map_err(crate::native_mods::cache_error)
+            .unwrap();
+        let (_command, guard) = crate::backend::prepare_command(java).unwrap();
+        assert!(guard.warning.is_none(), "{:?}", guard.warning);
+        assert_default_homes_absent(root);
+        return;
+    }
+    spawn_without_horizon_home(
+        ENV,
+        "run_leases::tests::a_java_edition_launch_without_horizon_home_starts_when_default_home_is_missing",
+    );
+}
+
+#[test]
+fn a_horizon_launch_without_horizon_home_skips_missing_default_home() {
+    const ENV: &str = "HORIZON_NO_DEFAULT_HOME_ROOT";
+    if let Some(root) = std::env::var_os(ENV) {
+        let root = Path::new(&root);
+        let home = root.join("home");
+        let source = root.join("versions/native-fixture");
+        let resources = root.join("resources");
+        for folder in [&home, &source, &resources] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let mut game = horizon_game(root);
+        game.current_dir(&home);
+        snapshot(&mut game);
+        let claims = shared(&game).unwrap();
+        let registry = Registry::open().unwrap();
+        assert!(matches!(
+            registry.lock(&directory(&resources), LockMode::Exclusive),
+            Err(Error::Busy)
+        ));
+        drop(claims);
+        assert_default_homes_absent(root);
+        let server = crate::backend::server_command("nightly", &home);
+        assert_eq!(
+            override_value(&server, "HORIZON_HOME"),
+            Some(Some(home.as_os_str()))
+        );
+        return;
+    }
+    spawn_without_horizon_home(
+        ENV,
+        "run_leases::tests::a_horizon_launch_without_horizon_home_skips_missing_default_home",
+    );
+}
+
+#[test]
+fn shared_canonicalize_errors_name_the_missing_folder() {
+    let root = tempfile::tempdir().unwrap();
+    let missing_home = root.path().join("missing-instance");
+    let mut cmd = Command::new("game");
+    cmd.current_dir(&missing_home);
+    let Err(error) = shared(&cmd).map_err(crate::native_mods::cache_error) else {
+        panic!("missing working directory succeeded");
+    };
+    let shown_home = crate::backend::plain(missing_home).display().to_string();
+    assert!(error.contains(&shown_home), "{error}");
+
+    let home = root.path().join("instance");
+    let source = root.path().join("versions/native-fixture");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&source).unwrap();
+    let missing_resources = root.path().join("missing-resources");
+    let mut game = Command::new(root.path().join("game"));
+    game.arg("--resources")
+        .arg(&missing_resources)
+        .current_dir(&home)
+        .env("HORIZON_HOME", &home);
+    mark(&mut game, &source);
+    snapshot(&mut game);
+    let Err(error) = shared(&game).map_err(crate::native_mods::cache_error) else {
+        panic!("missing resources succeeded");
+    };
+    let shown_resources = crate::backend::plain(missing_resources)
+        .display()
+        .to_string();
+    assert!(error.contains(&shown_resources), "{error}");
+}

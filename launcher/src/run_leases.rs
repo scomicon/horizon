@@ -94,7 +94,7 @@ pub(crate) fn game_units_in(
     let selection = horizon_platform::mod_package::selection::LaunchArguments::for_command(
         snapshot.as_ref().unwrap_or(command),
     )?;
-    let data = data.canonicalize()?;
+    let data = canonical(data)?;
     let cwd = std::path::absolute(command.get_current_dir().unwrap_or(Path::new(".")))?;
     horizon_platform::mod_package::runtime_leases::lease_units(executable, &selection, &data, &cwd)
         .map_err(Into::into)
@@ -124,7 +124,7 @@ pub(crate) fn shared(command: &Command) -> Result<Vec<Claim>, Error> {
     let registry = Registry::open()?;
     let mut claims = Vec::new();
     if let Some(home) = command.get_current_dir() {
-        let home = home.canonicalize()?;
+        let home = canonical(home)?;
         // Claimed before its caches are stamped: a cleanup deleting one of them holds this
         // folder (#18669), so the launch is refused as busy rather than meeting a folder
         // detached mid-stamp.
@@ -152,11 +152,11 @@ pub(crate) fn shared(command: &Command) -> Result<Vec<Claim>, Error> {
         paths.push(home);
     }
     if let Some(logs) = logs.filter(|path| !path.as_os_str().is_empty()) {
-        fs::create_dir_all(&logs)?;
-        paths.push(logs.canonicalize()?);
+        fs::create_dir_all(&logs).map_err(|error| naming(&logs, Error::from(error)))?;
+        paths.push(canonical(&logs)?);
     }
     if let Some(source) = source {
-        let source = source.canonicalize()?;
+        let source = canonical(source)?;
         if let Some(parent) = source.parent() {
             paths.push(parent.to_owned());
         }
@@ -164,9 +164,10 @@ pub(crate) fn shared(command: &Command) -> Result<Vec<Claim>, Error> {
     }
     paths = paths
         .into_iter()
-        .map(|path| path.canonicalize())
+        .map(|path| canonical(&path))
         .collect::<Result<_, _>>()?;
-    let data = crate::backend::data_dir().canonicalize()?;
+    let data_dir = crate::backend::data_dir();
+    let data = canonical(&data_dir)?;
     for leaf in paths.clone() {
         if leaf.starts_with(&data) && leaf != data {
             for parent in leaf.ancestors().skip(1).take_while(|p| *p != data) {
@@ -204,7 +205,22 @@ fn argument_paths(command: &Command) -> std::io::Result<Vec<std::path::PathBuf>>
         // pairs, and the game's last argument then has no value (#18328).
         Some(game) => {
             let selection = LaunchArguments::for_command(&game)?;
-            let mut folders = vec![selection.context.game_dir, selection.context.home];
+            let mut folders = vec![selection.context.game_dir];
+            // When neither `--home` nor `HORIZON_HOME` is set, `LaunchArguments` falls back to
+            // the platform default (`~/.local/share/horizon`), which may not exist after moving
+            // the data folder (#19709). Hold it only when it exists; an explicit `HORIZON_HOME`
+            // is still created and held in `shared`.
+            if selection.context.home.try_exists().map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!(
+                        "{}: {error}",
+                        crate::backend::plain(selection.context.home.clone()).display()
+                    ),
+                )
+            })? {
+                folders.push(selection.context.home);
+            }
             // A wrapper can read another version's data (`wrapper --resources <B> -- game…`):
             // hold every folder its words name too. Only a scan, never fatal: an extra lease is
             // safe, and a word that names no folder has nothing to hold.
@@ -241,6 +257,12 @@ fn launcher_owned(path: &Path) -> bool {
         .into_iter()
         .filter_map(|root| root.canonicalize().ok())
         .any(|root| path.starts_with(root))
+}
+
+/// [`Path::canonicalize`], its error naming the folder.
+fn canonical(path: &Path) -> Result<std::path::PathBuf, Error> {
+    path.canonicalize()
+        .map_err(|error| naming(path, Error::from(error)))
 }
 
 /// [`crate::storage::mark_used`], its error naming the folder.
@@ -517,9 +539,10 @@ fn spawn_program(command: &mut Command) -> std::io::Result<std::process::Child> 
 
 /// Publish stable tree lock inodes before completing a newly installed unit.
 pub(crate) fn publish(path: &Path) -> Result<(), Error> {
-    let path = path.canonicalize()?;
+    let path = canonical(path)?;
     let registry = Registry::open()?;
-    let data = crate::backend::data_dir().canonicalize()?;
+    let data_dir = crate::backend::data_dir();
+    let data = canonical(&data_dir)?;
     if !path.starts_with(&data) {
         return Ok(());
     }
@@ -548,7 +571,8 @@ pub(crate) fn publish(path: &Path) -> Result<(), Error> {
         }
     }
     for unit in units {
-        let directory = Dir::open_ambient_dir(&unit, cap_std::ambient_authority())?;
+        let directory = Dir::open_ambient_dir(&unit, cap_std::ambient_authority())
+            .map_err(|error| naming(&unit, Error::from(error)))?;
         drop(
             registry
                 .lock(&directory, LockMode::Shared)

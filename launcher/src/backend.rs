@@ -3129,6 +3129,7 @@ pub fn server_command(tag: &str, folder: &Path) -> Command {
     }
     crate::run_leases::mark(&mut cmd, &version_dir(tag));
     cmd.current_dir(folder)
+        .env("HORIZON_HOME", folder)
         .arg("--resources")
         .arg(resources(tag))
         .args(["--dedicated", "--nogui"]);
