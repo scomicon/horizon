@@ -667,6 +667,13 @@ fn a_horizon_launch_without_horizon_home_skips_missing_default_home() {
             override_value(&server, "HORIZON_HOME"),
             Some(Some(home.as_os_str()))
         );
+        let relative_server =
+            crate::backend::server_command("nightly", Path::new("relative-server"));
+        let expected_relative = std::path::absolute(Path::new("relative-server")).unwrap();
+        assert_eq!(
+            override_value(&relative_server, "HORIZON_HOME"),
+            Some(Some(expected_relative.as_os_str()))
+        );
         return;
     }
     spawn_without_horizon_home(

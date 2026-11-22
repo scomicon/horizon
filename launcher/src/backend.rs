@@ -3128,8 +3128,9 @@ pub fn server_command(tag: &str, folder: &Path) -> Command {
         cmd.env("HORIZON_TELEMETRY_URL", "off");
     }
     crate::run_leases::mark(&mut cmd, &version_dir(tag));
+    let home = std::path::absolute(folder).unwrap_or_else(|_| folder.to_path_buf());
     cmd.current_dir(folder)
-        .env("HORIZON_HOME", folder)
+        .env("HORIZON_HOME", &home)
         .arg("--resources")
         .arg(resources(tag))
         .args(["--dedicated", "--nogui"]);
@@ -3420,7 +3421,8 @@ pub fn server(tag: &str, folder: &Path, accept_eula: bool) -> Result<Command, St
         return Err("Running a server needs your agreement to the Minecraft EULA (https://aka.ms/MinecraftEULA). Accept it to continue.".into());
     }
     fs::create_dir_all(folder).map_err(|e| e.to_string())?;
-    Ok(server_command(tag, folder))
+    let folder = std::path::absolute(folder).map_err(|e| e.to_string())?;
+    Ok(server_command(tag, &folder))
 }
 
 mod release_selection;
