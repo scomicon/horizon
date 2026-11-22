@@ -159,11 +159,30 @@ fn resolve_common_dir(git_dir: &Path) -> Result<PathBuf, String> {
 
 fn resolve_relative(base: &Path, raw: &str) -> PathBuf {
     let path = Path::new(raw);
-    if path.is_absolute() {
+    let joined = if path.is_absolute() {
         path.to_path_buf()
     } else {
         base.join(path)
+    };
+    normalize_path(&joined)
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut parts: Vec<Component<'_>> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(parts.last(), Some(Component::Normal(_))) {
+                    parts.pop();
+                } else {
+                    parts.push(component);
+                }
+            }
+            _ => parts.push(component),
+        }
     }
+    parts.into_iter().collect()
 }
 
 fn validate_rel_ref(ref_name: &str) -> Result<PathBuf, String> {
