@@ -94,6 +94,13 @@ fn read_git_head(start: &Path) -> Result<Resolved, String> {
 
         if let Some((oid, packed_path)) = find_packed_ref(&git_dir, &common_dir, ref_name)? {
             watch_paths.push(packed_path);
+            for root in [&git_dir, &common_dir] {
+                if let Some(parent) = nearest_existing_dir(root, &root.join(&rel_ref))
+                    && !watch_paths.contains(&parent)
+                {
+                    watch_paths.push(parent);
+                }
+            }
             return Ok(Resolved {
                 commit: oid,
                 watch_paths,
@@ -220,6 +227,20 @@ fn find_packed_ref(
         }
     }
     Ok(None)
+}
+
+fn nearest_existing_dir(root: &Path, target: &Path) -> Option<PathBuf> {
+    let mut current = target.parent();
+    while let Some(dir) = current {
+        if dir.is_dir() {
+            return Some(dir.to_path_buf());
+        }
+        if dir == root {
+            break;
+        }
+        current = dir.parent();
+    }
+    root.is_dir().then(|| root.to_path_buf())
 }
 
 fn validate_oid(oid: &str) -> Result<(), String> {
@@ -392,5 +413,68 @@ mod tests {
         let dir = TempDir::new("no-git");
         let err = resolve(None, dir.path(), missing_git()).err().unwrap();
         assert!(err.contains("HORIZON_GAME_BUILD_ID"), "{err}");
+    }
+
+    #[test]
+    fn packed_ref_watches_loose_ref_parent_and_detects_loose_override() {
+        let dir = TempDir::new("packed-loose");
+        let packed_oid = "abcdef0123456789abcdef0123456789abcdef01";
+        let loose_oid = "9999999999999999999999999999999999999999";
+        let git_dir = dir.path().join(".git");
+        fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
+        fs::write(git_dir.join("HEAD"), "ref: refs/heads/topic/main\n").unwrap();
+        let packed = git_dir.join("packed-refs");
+        fs::write(&packed, format!("{packed_oid} refs/heads/topic/main\n")).unwrap();
+
+        let initial = resolve(None, dir.path(), missing_git()).unwrap();
+        assert_eq!(initial.commit, packed_oid);
+        assert!(initial.watch_paths.contains(&packed));
+        assert!(initial.watch_paths.contains(&git_dir.join("refs/heads")));
+
+        let loose_dir = git_dir.join("refs/heads/topic");
+        fs::create_dir_all(&loose_dir).unwrap();
+        let loose_ref = loose_dir.join("main");
+        fs::write(&loose_ref, format!("{loose_oid}\n")).unwrap();
+
+        let updated = resolve(None, dir.path(), missing_git()).unwrap();
+        assert_eq!(updated.commit, loose_oid);
+        assert!(updated.watch_paths.contains(&loose_ref));
+    }
+
+    #[test]
+    fn packed_worktree_ref_watches_shared_refs_parent() {
+        let dir = TempDir::new("packed-wt");
+        let packed_oid = "3333333333333333333333333333333333333333";
+        let loose_oid = "4444444444444444444444444444444444444444";
+        let common = dir.path().join("main/.git");
+        let wt_git = common.join("worktrees/feature");
+        let wt_root = dir.path().join("feature-wt");
+        let crate_dir = wt_root.join("crates/horizon-mod-host");
+        fs::create_dir_all(common.join("refs/heads")).unwrap();
+        fs::create_dir_all(&wt_git).unwrap();
+        fs::create_dir_all(&crate_dir).unwrap();
+
+        fs::write(
+            common.join("packed-refs"),
+            format!("{packed_oid} refs/heads/wt-packed\n"),
+        )
+        .unwrap();
+        fs::write(wt_git.join("commondir"), "../..\n").unwrap();
+        fs::write(wt_git.join("HEAD"), "ref: refs/heads/wt-packed\n").unwrap();
+        fs::write(
+            wt_root.join(".git"),
+            "gitdir: ../main/.git/worktrees/feature\n",
+        )
+        .unwrap();
+
+        let initial = resolve(None, &crate_dir, missing_git()).unwrap();
+        assert_eq!(initial.commit, packed_oid);
+        assert!(initial.watch_paths.contains(&common.join("refs/heads")));
+
+        let loose_ref = common.join("refs/heads/wt-packed");
+        fs::write(&loose_ref, format!("{loose_oid}\n")).unwrap();
+        let updated = resolve(None, &crate_dir, missing_git()).unwrap();
+        assert_eq!(updated.commit, loose_oid);
+        assert!(updated.watch_paths.contains(&loose_ref));
     }
 }
