@@ -26,3 +26,7 @@ use mod_points as _;
 
 /// A point listener of generated native startup; none exists since #19576.
 pub use mod_api::__private::native::SlotListener;
+
+#[cfg(test)]
+#[path = "../build_identity.rs"]
+mod build_identity;
