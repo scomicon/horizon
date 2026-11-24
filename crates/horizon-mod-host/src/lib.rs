@@ -29,4 +29,5 @@ pub use mod_api::__private::native::SlotListener;
 
 #[cfg(test)]
 #[path = "../build_identity.rs"]
+#[allow(dead_code)] // `resolve` runs `git`; only build.rs calls it, the tests stay off processes
 mod build_identity;

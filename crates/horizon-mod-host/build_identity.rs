@@ -14,14 +14,7 @@ pub(crate) fn resolve(
     git_program: &OsStr,
 ) -> Result<Resolved, String> {
     if let Some(raw) = env_id {
-        let commit = raw.trim().to_owned();
-        if commit.is_empty() {
-            return Err("game build identity must not be empty".to_owned());
-        }
-        return Ok(Resolved {
-            commit,
-            watch_paths: Vec::new(),
-        });
+        return resolve_from_env(raw);
     }
 
     let git_error = match Command::new(git_program)
@@ -57,6 +50,23 @@ pub(crate) fn resolve(
         Err(error) => format!("failed to run git: {error}"),
     };
 
+    resolve_without_git(manifest_dir, &git_error)
+}
+
+/// `HORIZON_GAME_BUILD_ID` wins over any repository.
+fn resolve_from_env(raw: &str) -> Result<Resolved, String> {
+    let commit = raw.trim().to_owned();
+    if commit.is_empty() {
+        return Err("game build identity must not be empty".to_owned());
+    }
+    Ok(Resolved {
+        commit,
+        watch_paths: Vec::new(),
+    })
+}
+
+/// The `.git` fallback when `git` itself could not answer; starts no process.
+fn resolve_without_git(manifest_dir: &Path, git_error: &str) -> Result<Resolved, String> {
     read_git_head(manifest_dir).map_err(|git_dir_error| {
         format!(
             "{git_error}; fallback reading .git also failed ({git_dir_error}); \
@@ -248,18 +258,21 @@ fn find_packed_ref(
     Ok(None)
 }
 
+/// The closest existing directory above `target`, never above `<root>/refs`: watching the git
+/// dir itself would rerun the build script on every index or log write.
 fn nearest_existing_dir(root: &Path, target: &Path) -> Option<PathBuf> {
+    let floor = root.join("refs");
     let mut current = target.parent();
     while let Some(dir) = current {
+        if !dir.starts_with(&floor) {
+            break;
+        }
         if dir.is_dir() {
             return Some(dir.to_path_buf());
         }
-        if dir == root {
-            break;
-        }
         current = dir.parent();
     }
-    root.is_dir().then(|| root.to_path_buf())
+    None
 }
 
 fn validate_oid(oid: &str) -> Result<(), String> {
@@ -303,24 +316,20 @@ mod tests {
         }
     }
 
-    fn missing_git() -> &'static OsStr {
-        OsStr::new("horizon-definitely-missing-git-executable")
+    fn resolve_from_dot_git(dir: &Path) -> Result<Resolved, String> {
+        resolve_without_git(dir, "failed to run git")
     }
 
     #[test]
     fn env_override_wins_without_git_or_repo() {
-        let dir = TempDir::new("env");
-        let resolved = resolve(Some("  custom-build-123  "), dir.path(), missing_git()).unwrap();
+        let resolved = resolve_from_env("  custom-build-123  ").unwrap();
         assert_eq!(resolved.commit, "custom-build-123");
         assert!(resolved.watch_paths.is_empty());
     }
 
     #[test]
     fn empty_env_override_is_rejected() {
-        let dir = TempDir::new("empty-env");
-        let err = resolve(Some("   "), dir.path(), missing_git())
-            .err()
-            .unwrap();
+        let err = resolve_from_env("   ").err().unwrap();
         assert!(err.contains("empty"), "{err}");
     }
 
@@ -336,7 +345,7 @@ mod tests {
         let crate_dir = dir.path().join("crates/horizon-mod-host");
         fs::create_dir_all(&crate_dir).unwrap();
 
-        let resolved = resolve(None, &crate_dir, missing_git()).unwrap();
+        let resolved = resolve_from_dot_git(&crate_dir).unwrap();
         assert_eq!(resolved.commit, sha1);
         assert!(resolved.watch_paths.contains(&git_dir.join("HEAD")));
         assert!(resolved.watch_paths.contains(&ref_file));
@@ -362,7 +371,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolved = resolve(None, dir.path(), missing_git()).unwrap();
+        let resolved = resolve_from_dot_git(dir.path()).unwrap();
         assert_eq!(resolved.commit, sha1);
         assert!(resolved.watch_paths.contains(&packed));
     }
@@ -373,19 +382,13 @@ mod tests {
         let dir1 = TempDir::new("detached1");
         fs::create_dir_all(dir1.path().join(".git")).unwrap();
         fs::write(dir1.path().join(".git/HEAD"), format!("{sha1}\n")).unwrap();
-        assert_eq!(
-            resolve(None, dir1.path(), missing_git()).unwrap().commit,
-            sha1
-        );
+        assert_eq!(resolve_from_dot_git(dir1.path()).unwrap().commit, sha1);
 
         let sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let dir2 = TempDir::new("detached256");
         fs::create_dir_all(dir2.path().join(".git")).unwrap();
         fs::write(dir2.path().join(".git/HEAD"), format!("{sha256}\n")).unwrap();
-        assert_eq!(
-            resolve(None, dir2.path(), missing_git()).unwrap().commit,
-            sha256
-        );
+        assert_eq!(resolve_from_dot_git(dir2.path()).unwrap().commit, sha256);
     }
 
     #[test]
@@ -409,7 +412,7 @@ mod tests {
         )
         .unwrap();
 
-        let resolved = resolve(None, &crate_dir, missing_git()).unwrap();
+        let resolved = resolve_from_dot_git(&crate_dir).unwrap();
         assert_eq!(resolved.commit, sha1);
     }
 
@@ -419,18 +422,18 @@ mod tests {
         let git_dir = dir.path().join(".git");
         fs::create_dir_all(&git_dir).unwrap();
         fs::write(git_dir.join("HEAD"), "ref: ../outside\n").unwrap();
-        let err = resolve(None, dir.path(), missing_git()).err().unwrap();
+        let err = resolve_from_dot_git(dir.path()).err().unwrap();
         assert!(err.contains("unsafe git ref"), "{err}");
 
         fs::write(git_dir.join("HEAD"), "not-a-sha\n").unwrap();
-        let err = resolve(None, dir.path(), missing_git()).err().unwrap();
+        let err = resolve_from_dot_git(dir.path()).err().unwrap();
         assert!(err.contains("invalid git object id"), "{err}");
     }
 
     #[test]
     fn reports_actionable_error_when_git_and_dot_git_are_both_missing() {
         let dir = TempDir::new("no-git");
-        let err = resolve(None, dir.path(), missing_git()).err().unwrap();
+        let err = resolve_from_dot_git(dir.path()).err().unwrap();
         assert!(err.contains("HORIZON_GAME_BUILD_ID"), "{err}");
     }
 
@@ -445,7 +448,7 @@ mod tests {
         let packed = git_dir.join("packed-refs");
         fs::write(&packed, format!("{packed_oid} refs/heads/topic/main\n")).unwrap();
 
-        let initial = resolve(None, dir.path(), missing_git()).unwrap();
+        let initial = resolve_from_dot_git(dir.path()).unwrap();
         assert_eq!(initial.commit, packed_oid);
         assert!(initial.watch_paths.contains(&packed));
         assert!(initial.watch_paths.contains(&git_dir.join("refs/heads")));
@@ -455,7 +458,7 @@ mod tests {
         let loose_ref = loose_dir.join("main");
         fs::write(&loose_ref, format!("{loose_oid}\n")).unwrap();
 
-        let updated = resolve(None, dir.path(), missing_git()).unwrap();
+        let updated = resolve_from_dot_git(dir.path()).unwrap();
         assert_eq!(updated.commit, loose_oid);
         assert!(updated.watch_paths.contains(&loose_ref));
     }
@@ -486,13 +489,13 @@ mod tests {
         )
         .unwrap();
 
-        let initial = resolve(None, &crate_dir, missing_git()).unwrap();
+        let initial = resolve_from_dot_git(&crate_dir).unwrap();
         assert_eq!(initial.commit, packed_oid);
         assert!(initial.watch_paths.contains(&common.join("refs/heads")));
 
         let loose_ref = common.join("refs/heads/wt-packed");
         fs::write(&loose_ref, format!("{loose_oid}\n")).unwrap();
-        let updated = resolve(None, &crate_dir, missing_git()).unwrap();
+        let updated = resolve_from_dot_git(&crate_dir).unwrap();
         assert_eq!(updated.commit, loose_oid);
         assert!(updated.watch_paths.contains(&loose_ref));
     }
